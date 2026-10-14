@@ -12,16 +12,35 @@ const PORT = 3000;
 
 app.use(express.json({ limit: '10mb' }));
 
-// Helper to sanitize Gemini response text in case it includes markdown code fences
+// Helper to sanitize Gemini response text in case it includes markdown code fences or conversational wrappers
 function cleanJsonText(raw: string): string {
   let cleaned = (raw || '').trim();
-  if (cleaned.startsWith('```json')) {
-    cleaned = cleaned.slice(7);
-  } else if (cleaned.startsWith('```')) {
-    cleaned = cleaned.slice(3);
+  if (cleaned.includes('```')) {
+    const match = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (match && match[1]) {
+      cleaned = match[1].trim();
+    }
   }
-  if (cleaned.endsWith('```')) {
-    cleaned = cleaned.slice(0, -3);
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+  }
+  return cleaned.trim();
+}
+
+function cleanJsonArrayText(raw: string): string {
+  let cleaned = (raw || '').trim();
+  if (cleaned.includes('```')) {
+    const match = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (match && match[1]) {
+      cleaned = match[1].trim();
+    }
+  }
+  const firstBracket = cleaned.indexOf('[');
+  const lastBracket = cleaned.lastIndexOf(']');
+  if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+    cleaned = cleaned.substring(firstBracket, lastBracket + 1);
   }
   return cleaned.trim();
 }
@@ -30,7 +49,7 @@ function cleanJsonText(raw: string): string {
 function getGeminiClient(customApiKey?: string): GoogleGenAI {
   const apiKey = customApiKey?.trim() || process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    throw new Error('No Gemini API key provided. Please enter your Gemini API key in the AI Generator or set GEMINI_API_KEY.');
+    throw new Error('No Gemini API key provided. Please enter your Gemini API key in the AI Generator or Settings modal.');
   }
 
   return new GoogleGenAI({
@@ -43,30 +62,54 @@ function getGeminiClient(customApiKey?: string): GoogleGenAI {
   });
 }
 
-// Resilient fallback generator to handle 503 high demand or quota spikes
+// Timeout wrapper to prevent hanging requests from exceeding proxy gateway limits
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timeout: ${label} took more than ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
+}
+
+// Resilient fallback generator prioritizing fast high-throughput models
 async function generateWithFallback(client: GoogleGenAI, params: any) {
-  // Candidate models compliant with gemini-api skill
-  const candidates = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+  // gemini-3.1-flash-lite provides ultra-fast 2-3s responses and avoids 503 high demand spikes
+  const candidates = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
   let lastErr: any = null;
 
   for (const model of candidates) {
     try {
-      return await client.models.generateContent({
-        ...params,
-        model,
-      });
+      return await withTimeout(
+        client.models.generateContent({
+          ...params,
+          model,
+        }),
+        12000,
+        `Model ${model}`
+      );
     } catch (err: any) {
-      console.warn(`Model ${model} error:`, err?.message || err);
+      console.warn(`Model ${model} issue:`, err?.message || err);
       lastErr = err;
       const msg = err?.message || '';
 
       // Check if invalid API key, throw immediately
-      if (msg.includes('API key not valid') || msg.includes('API_KEY_INVALID') || msg.includes('403') || msg.includes('PERMISSION_DENIED')) {
+      if (
+        msg.includes('API key not valid') ||
+        msg.includes('API_KEY_INVALID') ||
+        msg.includes('403') ||
+        msg.includes('PERMISSION_DENIED')
+      ) {
         throw new Error('The provided Gemini API Key is invalid or unauthorized. Please verify your key at https://aistudio.google.com/app/apikey');
       }
 
-      // If 503 (high demand), 429 (rate limit), or UNAVAILABLE, try next candidate model
-      if (msg.includes('503') || msg.includes('high demand') || msg.includes('UNAVAILABLE') || msg.includes('429')) {
+      // If 503 (high demand), 429 (rate limit), UNAVAILABLE, or timeout, immediately try next candidate model
+      if (
+        msg.includes('503') ||
+        msg.includes('high demand') ||
+        msg.includes('UNAVAILABLE') ||
+        msg.includes('429') ||
+        msg.includes('Timeout:')
+      ) {
         continue;
       }
       throw err;
@@ -109,8 +152,8 @@ app.post('/api/generate-script', async (req, res) => {
 Your mission is to generate natural, engaging, and thorough teleprompter scripts with precise pronunciation/reading annotations (Ruby text) for learners of ANY language (both alphabet and non-alphabet).
 
 IMPORTANT LENGTH & DEPTH GUIDELINE:
-- Do NOT generate a short or truncated script. Provide a rich, immersive, and substantive practice text (around 14 to 22 natural reading lines).
-- Provide sufficient depth and context so the learner has an extensive, rewarding practice session without finishing too quickly.
+- Provide a rich, immersive, and substantive practice text (around 8 to 12 natural reading lines).
+- Provide sufficient depth, engaging vocabulary, and natural rhythm for an authentic practice session.
 
 Phonetic Rules:
 - English: The 'reading' field MUST contain IPA phonetic pronunciation (e.g., /ˌɛntrəprəˈnɜːr/, /ˈkʌmftəbl/, /ˌæksəˈlɛreɪt/) or clear syllable stress phonics for key or challenging words. For simple words, provide standard phonetic representation.
@@ -126,7 +169,7 @@ The script must feel authentic, engaging, and well-paced for scrolling telepromp
 
     const userInstruction = `Generate an in-depth, complete ${mode} script in ${language} (${level}) about: "${topic}".
 User instructions / custom nuances: ${userPrompt || 'Make it realistic, immersive, conversational, and rich in vocabulary.'}
-Generate a rich, substantive practice script with around 10 to 14 lines.
+Generate a rich, substantive practice script with around 8 to 12 lines.
 CRITICAL: The 'fullTranslation' field for EVERY line MUST be translated into ${translationLanguage} so the user understands the exact meaning in their preferred language.
 Also each token's 'meaning' field should be translated into ${translationLanguage}.
 
@@ -328,7 +371,7 @@ ${JSON.stringify(sentencesToTranslate, null, 2)}`,
       },
     });
 
-    const cleaned = cleanJsonText(response.text || '[]');
+    const cleaned = cleanJsonArrayText(response.text || '[]');
     const translations: { index: number; translatedText: string }[] = JSON.parse(cleaned);
     const translationMap = new Map<number, string>();
     translations.forEach((t) => translationMap.set(t.index, t.translatedText));
