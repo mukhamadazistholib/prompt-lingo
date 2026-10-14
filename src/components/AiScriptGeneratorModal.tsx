@@ -97,8 +97,33 @@ export const AiScriptGeneratorModal: React.FC<AiScriptGeneratorModalProps> = ({
         }),
       });
 
-      const json = await res.json();
-      if (!res.ok || !json.success) {
+      if (!res.ok) {
+        let errorMsg = `Server error (${res.status})`;
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const errJson = await res.json().catch(() => null);
+          if (errJson?.error) errorMsg = errJson.error;
+        } else {
+          const rawText = await res.text().catch(() => '');
+          if (rawText.includes('503') || rawText.includes('high demand') || rawText.includes('UNAVAILABLE')) {
+            errorMsg = 'Gemini model is experiencing high demand. Please try again in a moment or enter your personal Gemini API key.';
+          } else if (res.status === 504 || rawText.includes('timeout') || rawText.includes('The page')) {
+            errorMsg = 'The request timed out. Please try a simpler topic or enter your personal Gemini API key.';
+          } else {
+            errorMsg = `Server returned status ${res.status}. Please check your connection or Gemini API key.`;
+          }
+        }
+        throw new Error(errorMsg);
+      }
+
+      let json: any;
+      try {
+        json = await res.json();
+      } catch {
+        throw new Error('Server returned an invalid response format. Please try again.');
+      }
+
+      if (!json.success) {
         throw new Error(json.error || 'Failed to generate script');
       }
 

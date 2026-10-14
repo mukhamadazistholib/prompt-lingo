@@ -7,9 +7,24 @@ import path from 'path';
 dotenv.config();
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+// Environment constraint: Dev server must run on port 3000
+const PORT = 3000;
 
 app.use(express.json({ limit: '10mb' }));
+
+// Helper to sanitize Gemini response text in case it includes markdown code fences
+function cleanJsonText(raw: string): string {
+  let cleaned = (raw || '').trim();
+  if (cleaned.startsWith('```json')) {
+    cleaned = cleaned.slice(7);
+  } else if (cleaned.startsWith('```')) {
+    cleaned = cleaned.slice(3);
+  }
+  if (cleaned.endsWith('```')) {
+    cleaned = cleaned.slice(0, -3);
+  }
+  return cleaned.trim();
+}
 
 // Helper to create Gemini client per request (supporting User-Provided Key or Server Default)
 function getGeminiClient(customApiKey?: string): GoogleGenAI {
@@ -111,7 +126,7 @@ The script must feel authentic, engaging, and well-paced for scrolling telepromp
 
     const userInstruction = `Generate an in-depth, complete ${mode} script in ${language} (${level}) about: "${topic}".
 User instructions / custom nuances: ${userPrompt || 'Make it realistic, immersive, conversational, and rich in vocabulary.'}
-Generate a comprehensive, substantive script with around 14 to 22 lines.
+Generate a rich, substantive practice script with around 10 to 14 lines.
 CRITICAL: The 'fullTranslation' field for EVERY line MUST be translated into ${translationLanguage} so the user understands the exact meaning in their preferred language.
 Also each token's 'meaning' field should be translated into ${translationLanguage}.
 
@@ -183,7 +198,8 @@ Return STRICT JSON matching the schema:
       },
     });
 
-    const parsed = JSON.parse(response.text || '{}');
+    const cleaned = cleanJsonText(response.text || '{}');
+    const parsed = JSON.parse(cleaned);
     res.json({ success: true, data: parsed });
   } catch (error: any) {
     console.error('Error generating script:', error);
@@ -261,7 +277,8 @@ Group natural word segments so reading stays aligned with the main characters.`;
       },
     });
 
-    const parsed = JSON.parse(response.text || '{}');
+    const cleaned = cleanJsonText(response.text || '{}');
+    const parsed = JSON.parse(cleaned);
     res.json({ success: true, data: parsed });
   } catch (error: any) {
     console.error('Error annotating text:', error);
@@ -311,7 +328,8 @@ ${JSON.stringify(sentencesToTranslate, null, 2)}`,
       },
     });
 
-    const translations: { index: number; translatedText: string }[] = JSON.parse(response.text || '[]');
+    const cleaned = cleanJsonText(response.text || '[]');
+    const translations: { index: number; translatedText: string }[] = JSON.parse(cleaned);
     const translationMap = new Map<number, string>();
     translations.forEach((t) => translationMap.set(t.index, t.translatedText));
 
