@@ -1,0 +1,11 @@
+{
+  "name": "LingoPrompt AI - Language Learning Teleprompter",
+  "description": "An interactive smart language learning teleprompter with dual-tier phonetic typography (IPA, Pinyin, Furigana, Romanization), Gemini AI speech generator, and studio controls.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
