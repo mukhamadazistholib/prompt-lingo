@@ -71,20 +71,35 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
 }
 
-// Resilient fallback generator prioritizing fast high-throughput models
+// Resilient fallback generator prioritizing fast, currently active models with Cloud Run timeout guard
 async function generateWithFallback(client: GoogleGenAI, params: any) {
-  // gemini-3.1-flash-lite provides ultra-fast 2-3s responses and avoids 503 high demand spikes
-  const candidates = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
+  // Top healthy models ordered by active uptime and fast generation speed
+  const candidates = [
+    'gemini-3-flash-preview',
+    'gemini-2.5-flash',
+    'gemini-3.6-flash',
+  ];
   let lastErr: any = null;
+  const startTime = Date.now();
+  const maxTotalDurationMs = 23000; // Stay strictly within Cloud Run 25s gateway limit
 
   for (const model of candidates) {
+    const elapsed = Date.now() - startTime;
+    const remainingTime = maxTotalDurationMs - elapsed;
+    if (remainingTime < 3500) {
+      console.warn(`[Gemini] Insufficient time left (${remainingTime}ms) to attempt ${model}`);
+      break;
+    }
+
+    const perModelTimeout = Math.min(17000, remainingTime);
+
     try {
       return await withTimeout(
         client.models.generateContent({
           ...params,
           model,
         }),
-        12000,
+        perModelTimeout,
         `Model ${model}`
       );
     } catch (err: any) {
@@ -146,14 +161,22 @@ app.post('/api/generate-script', async (req, res) => {
       level = 'Intermediate (B1-B2)',
       userPrompt = '',
       translationLanguage = 'Indonesian', // user's preferred native language for the 3rd tier translation
+      scriptLength = 'standard', // 'quick' | 'standard' | 'extended'
     } = req.body;
+
+    const lengthGuide =
+      scriptLength === 'quick'
+        ? 'around 4 to 5 natural, punchy spoken lines (ideal for quick rehearsals)'
+        : scriptLength === 'extended'
+        ? 'around 7 to 9 natural reading lines'
+        : 'around 5 to 7 natural, well-paced spoken lines';
 
     const systemPrompt = `You are a world-class speech coach and language educator writing teleprompter practice scripts.
 Your mission is to generate natural, engaging, and thorough teleprompter scripts with precise pronunciation/reading annotations (Ruby text) for learners of ANY language (both alphabet and non-alphabet).
 
 IMPORTANT LENGTH & DEPTH GUIDELINE:
-- Provide a rich, immersive, and substantive practice text (around 8 to 12 natural reading lines).
-- Provide sufficient depth, engaging vocabulary, and natural rhythm for an authentic practice session.
+- Provide an engaging, well-paced teleprompter practice text with ${lengthGuide}.
+- Maintain authentic spoken rhythm, practical vocabulary, and natural dialogue/speech for an immersive practice session.
 
 Phonetic Rules:
 - English: The 'reading' field MUST contain IPA phonetic pronunciation (e.g., /ˌɛntrəprəˈnɜːr/, /ˈkʌmftəbl/, /ˌæksəˈlɛreɪt/) or clear syllable stress phonics for key or challenging words. For simple words, provide standard phonetic representation.
@@ -167,11 +190,14 @@ Phonetic Rules:
 
 The script must feel authentic, engaging, and well-paced for scrolling teleprompter reading.`;
 
-    const userInstruction = `Generate an in-depth, complete ${mode} script in ${language} (${level}) about: "${topic}".
-User instructions / custom nuances: ${userPrompt || 'Make it realistic, immersive, conversational, and rich in vocabulary.'}
-Generate a rich, substantive practice script with around 8 to 12 lines.
-CRITICAL: The 'fullTranslation' field for EVERY line MUST be translated into ${translationLanguage} so the user understands the exact meaning in their preferred language.
-Also each token's 'meaning' field should be translated into ${translationLanguage}.
+    const userInstruction = `Generate an authentic, complete ${mode} script in ${language} (${level}) about: "${topic}".
+User instructions / custom nuances: ${userPrompt || 'Make it realistic, immersive, conversational, and rich in practical vocabulary.'}
+Script Length: ${lengthGuide}.
+
+CRITICAL REQUIREMENTS:
+1. The 'fullTranslation' field for EVERY line MUST be translated into ${translationLanguage} so the user understands the exact meaning.
+2. In 'tokens', each item must contain 'text' (the word or word segment) and 'reading' (accurate phonetic pronunciation guide). Do not write repetitive dictionary explanations on every token; keep token generation fast and clean.
+3. Provide 4 to 5 key 'vocabHighlights' with term, reading, and meaning translated into ${translationLanguage}.
 
 Return STRICT JSON matching the schema:
 - title: catchy title in English & target language
@@ -180,9 +206,9 @@ Return STRICT JSON matching the schema:
 - topic: string
 - level: string
 - type: "${mode}"
-- estimatedWpm: speaking speed for this level (typically 100-130 WPM)
-- vocabHighlights: array of 4-6 key vocabulary items with term, reading, meaning (meaning in ${translationLanguage})
-- lines: array of script lines. For dialogue, include 'speaker'. Each line has 'tokens' (array of { text, reading, meaning in ${translationLanguage} }) and 'fullTranslation' (translated into ${translationLanguage}).`;
+- estimatedWpm: speaking speed for this level (typically 105-125 WPM)
+- vocabHighlights: array of 4-5 key vocabulary items with term, reading, meaning (meaning in ${translationLanguage})
+- lines: array of script lines. For dialogue, include 'speaker'. Each line has 'tokens' (array of { text, reading }) and 'fullTranslation' (translated into ${translationLanguage}).`;
 
     const response = await generateWithFallback(client, {
       contents: userInstruction,
